@@ -21,8 +21,7 @@ c.execute('''
     )
 ''')
 
-# 2. 既存のテーブルに成績カラムがなければ自動で追加する（賢いアップデート機能）
-# これにより、DBファイルを消さなくてもそのまま安全にアップグレードできます
+# 2. 既存のテーブルに成績カラムがなければ自動で追加する
 existing_columns = [col[1] for col in c.execute("PRAGMA table_info(members)").fetchall()]
 stats_columns = {
     "games": "INTEGER DEFAULT 0",     # 試合数
@@ -48,9 +47,10 @@ team_id = st.text_input(
 
 if not team_id:
     st.info("👆 チームの「合言葉」を入力すると、メンバー表と成績を自動で読み込みます！")
+    conn.close()
     st.stop()
 
-# --- データベースからメンバーと成績を読み込む関数 ---
+# --- データベースからメンバーと成績を確実に読み込む関数 ---
 def load_members(tid):
     query = """
         SELECT 
@@ -65,24 +65,34 @@ def load_members(tid):
         FROM members WHERE team_id = ?
     """
     df = pd.read_sql_query(query, conn, params=(tid,))
+    
+    # 新規チーム、またはデータが空の場合の初期枠
     if df.empty:
-        return pd.DataFrame([
+        df = pd.DataFrame([
             {"名前": "選手1", "背番号": "1", "ポジション": "ピッチャー", "試合": 0, "打数": 0, "安打": 0, "本塁打": 0, "打点": 0},
         ])
+    
+    # 万が一、古いキャッシュが残っていて列が足りない場合の安全対策（KeyError防止）
+    required_cols = ["試合", "打数", "安打", "本塁打", "打点"]
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = 0
+            
     return df
 
-# セッションに保持
-if 'current_team_id' not in st.session_state or st.session_state.current_team_id != team_id:
-    st.session_state.current_team_id = team_id
-    st.session_state.member_df = load_members(team_id)
-
-# 打率を自動計算して追加表示する
+# 打率を自動計算して追加表示する関数
 def calculate_avg(df):
-    # 打数(at_bats)が0の場合は打率.000にする
+    # 安全に数値型へ変換
+    df["打数"] = pd.to_numeric(df["打数"], errors='coerce').fillna(0).astype(int)
+    df["安打"] = pd.to_numeric(df["安打"], errors='coerce').fillna(0).astype(int)
+    
+    # 打数が0の場合は .000 にする
     df["打率"] = df.apply(lambda row: f'{row["安打"] / row["打数"]:.3f}'.lstrip('0') if row["打数"] > 0 else '.000', axis=1)
     return df
 
-st.session_state.member_df = calculate_avg(st.session_state.member_df)
+# データの読み込みと打率計算を常に最新の状態で実行
+st.session_state.current_team_id = team_id
+st.session_state.member_df = calculate_avg(load_members(team_id))
 
 
 # ==========================================
@@ -115,12 +125,10 @@ with tab1:
                 default_pos = p_info["ポジション"].values[0] if not p_info.empty else "未設定"
                 avg = p_info["打率"].values[0] if not p_info.empty else ".000"
                 hr = p_info["本塁打"].values[0] if not p_info.empty else "0"
-                rbi = p_info["打点"].values[0] if not p_info.empty else "0"
                 
                 if default_pos not in positions:
                     default_pos = "未設定"
                 
-                # 成績と背番号を一緒に表示して、ベンチでの采配をサポート！
                 sub1, sub2 = st.columns([1.5, 2.5])
                 with sub1:
                     st.caption(f"#{b_num} / **{avg}** (HR:{hr})")
@@ -152,7 +160,6 @@ with tab2:
     st.header(f"📊 「{team_id}」の成績・名簿")
     st.write("数字を書き換えて下の「保存」を押すと通算成績が更新されます。打率は自動計算されます！")
     
-    # 打率は自動計算なので、編集用データからは除外してスマートに入力させる
     edit_target_df = st.session_state.member_df[["名前", "背番号", "ポジション", "試合", "打数", "安打", "本塁打", "打点"]]
     
     edited_df = st.data_editor(
@@ -163,10 +170,8 @@ with tab2:
     )
     
     if st.button("💾 成績・メンバー表をデータベースに保存", use_container_width=True):
-        # 一旦古いデータを削除して登録し直す
         c.execute("DELETE FROM members WHERE team_id = ?", (team_id,))
         for _, row in edited_df.iterrows():
-            # 安全な型変換
             g = int(row["試合"]) if pd.notna(row["試合"]) and str(row["試合"]).isdigit() else 0
             ab = int(row["打数"]) if pd.notna(row["打数"]) and str(row["打数"]).isdigit() else 0
             h = int(row["安打"]) if pd.notna(row["安打"]) and str(row["安打"]).isdigit() else 0
@@ -179,9 +184,7 @@ with tab2:
             """, (team_id, str(row["名前"]), str(row["背番号"]), str(row["ポジション"]), g, ab, h, hr, rbi))
         
         conn.commit()
-        # 再読み込みして打率を再計算
-        st.session_state.member_df = calculate_avg(load_members(team_id))
         st.success("✨ 成績データを完全にアップデートしました！")
-        st.rerun() # 画面をリフレッシュしてタブ1にも最新数値を反映
+        st.rerun()
 
 conn.close()
