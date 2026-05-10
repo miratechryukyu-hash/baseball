@@ -33,7 +33,7 @@ member_list = st.session_state.member_df["名前"].tolist()
 positions = ["ピッチャー", "キャッチャー", "ファースト", "セカンド", "サード", "ショート", "レフト", "センター", "ライト", "DH"]
 
 order_data = []
-cols = st.columns(3) # 3列で表示
+cols = st.columns(1) # 3列で表示
 
 for i in range(1, 10):
     with cols[(i-1) % 3]:
